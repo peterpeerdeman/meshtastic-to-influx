@@ -46,18 +46,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_id = utils::generate_rand_id();
     let stream_api = stream_api.configure(config_id).await?;
+    use tokio::time::{sleep, Duration};
 
-    // This loop can be broken with ctrl+c, or by unpowering the radio.
-    while let Some(decoded_packet) = decoded_listener.recv().await {
-        // Only process and display NodeInfo packets
-        handle_from_radio_packet(decoded_packet, &client)
+    loop {
+        tokio::select! {
+            Some(decoded_packet) = decoded_listener.recv() => {
+                // Only process and display NodeInfo packets
+                handle_from_radio_packet(decoded_packet, &client)
+            }
+            _ = sleep(Duration::from_secs(3)) => {
+                println!("No data received for 3 seconds, stopping...");
+                let _stream_api = stream_api.disconnect().await?;
+                break;
+            }
+        }
     }
-
-    // Note that in this specific example, this will only be called when
-    // the radio is disconnected, as the above loop will never exit.
-    // Typically you would allow the user to manually kill the loop,
-    // for example with tokio::select!.
-    let _stream_api = stream_api.disconnect().await?;
 
     Ok(())
 }
