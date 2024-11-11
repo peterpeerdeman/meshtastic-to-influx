@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new("http://localhost:8086", "meshtastic");
     let stream_api = StreamApi::new();
+    let mut readings: Vec<NodeInfoReading> = Vec::new();
 
     let address = "192.168.117.176:4403".to_string();
 
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             Some(decoded_packet) = decoded_listener.recv() => {
                 // Only process and display NodeInfo packets
-                handle_from_radio_packet(decoded_packet, &client)
+                handle_from_radio_packet(decoded_packet, &client, &mut readings)
             }
             _ = sleep(Duration::from_secs(3)) => {
                 println!("No data received for 3 seconds, stopping...");
@@ -62,6 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let queries: Vec<_> = readings.iter().map(|r| r.clone().into_query("node_info")).collect();
+    println!("{:?}", queries);
+    client.query(queries).await.unwrap();
+
     Ok(())
 }
 
@@ -70,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The Meshtastic `PhoneAPI` will return decoded `FromRadio` packets, which
 /// can then be handled based on their payload variant. Note that the payload
 /// variant can be `None`, in which case the packet should be ignored.
-fn handle_from_radio_packet(from_radio_packet: meshtastic::protobufs::FromRadio, client: &Client) {
+fn handle_from_radio_packet(from_radio_packet: meshtastic::protobufs::FromRadio, client: &Client, readings: &mut Vec<NodeInfoReading>) {
     // Remove `None` variants to get the payload variant
     let payload_variant = match from_radio_packet.payload_variant {
         Some(payload_variant) => payload_variant,
@@ -88,7 +93,7 @@ fn handle_from_radio_packet(from_radio_packet: meshtastic::protobufs::FromRadio,
         //    println!("Received channel packet: {:?}", channel);
         //}
         meshtastic::protobufs::from_radio::PayloadVariant::NodeInfo(node_info) => {
-            handle_nodeinfo_packet(node_info, &client)
+            handle_nodeinfo_packet(node_info, client, readings)
             // println!("Received node info packet: {:?}", node_info);
         }
         //meshtastic::protobufs::from_radio::PayloadVariant::Packet(mesh_packet) => {
@@ -119,7 +124,7 @@ struct NodeInfoReading {
     hops_away: u32
 }
 
-fn handle_nodeinfo_packet(node_info: meshtastic::protobufs::NodeInfo, client: &Client) {
+fn handle_nodeinfo_packet(node_info: meshtastic::protobufs::NodeInfo, client: &Client, readings: &mut Vec<NodeInfoReading>) {
     // Extract user info if available
     let (node_id, long_name, short_name) = match &node_info.user {
         Some(user) => (
@@ -128,9 +133,9 @@ fn handle_nodeinfo_packet(node_info: meshtastic::protobufs::NodeInfo, client: &C
             user.short_name.clone()
         ),
         None => (
-            String::from("unknown"),
-            String::from("unknown"),
-            String::from("unknown")
+            String::from(""),
+            String::from(""),
+            String::from("")
         )
     };
 
@@ -158,7 +163,6 @@ fn handle_nodeinfo_packet(node_info: meshtastic::protobufs::NodeInfo, client: &C
         hops_away: node_info.hops_away
     };
 
-    let readings = vec![reading.into_query("node_info")];
-    println!("{:?}",readings);
-    // client.query(readings).await.unwrap();
+    readings.push(reading.clone());
+
 }
