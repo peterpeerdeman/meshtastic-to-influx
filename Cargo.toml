@@ -8,6 +8,7 @@ chrono = "0.4.38"
 fern = "0.7.0"
 humantime = "2.1.0"
 influxdb = { version = "0.7.2", features = ["derive"] }
-log = "0.4.22"
+log = { version = "0.4.22", features = ["kv"] }
 meshtastic = "0.1.6"
+structured-logger = "1.0.3"
 tokio = "1.41.1"
