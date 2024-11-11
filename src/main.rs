@@ -1,17 +1,40 @@
-/// This example connects to a TCP port on the radio, and prints out all received packets.
-/// This can be used with a simulated radio via the Meshtastic Docker firmware image.
-/// https://meshtastic.org/docs/software/linux-native#usage-with-docker
 extern crate meshtastic;
 
-use std::io::{self, BufRead};
-use std::time::SystemTime;
+mod models;
+mod handler;
+use crate::models::NodeInfoReading;
+use crate::handler::handle_nodeinfo_packet;
 
 use meshtastic::api::StreamApi;
 use meshtastic::utils;
-use influxdb::{Client, Error, InfluxDbWriteable, ReadQuery, Timestamp};
-use chrono::{DateTime, Utc};
+use influxdb::Client;
+use influxdb::InfluxDbWriteable;
 
-use structured_logger::{async_json::new_writer, unix_ms, Builder};
+use structured_logger::{async_json::new_writer, Builder};
+use tokio::time::{sleep, Duration};
+
+fn handle_from_radio_packet(from_radio_packet: meshtastic::protobufs::FromRadio, readings: &mut Vec<NodeInfoReading>) {
+    let payload_variant = match from_radio_packet.payload_variant {
+        Some(payload_variant) => payload_variant,
+        None => {
+            return;
+        }
+    };
+
+    if let meshtastic::protobufs::from_radio::PayloadVariant::NodeInfo(node_info) = payload_variant {
+        if node_info.last_heard == 0 {
+            return;
+        }
+        // NodeInfo { num: 3663944616, user: None, position: Some(Position { latitude_i: 526477974, longitude_i: 50414422, altitude: 10, time: 0, location_source: LocUnset, altitude_source: AltUnset, timestamp: 0, timestamp_millis_adjust: 0, altitude_hae: 0, altitude_geoidal_separation: 0, pdop: 0, hdop: 0, vdop: 0, gps_accuracy: 0, ground_speed: 0, ground_track: 0, fix_quality: 0, fix_type: 0, sats_in_view: 0, sensor_id: 0, next_update: 0, seq_number: 0, precision_bits: 0 }), snr: 0.0, last_heard: 1731338908, device_metrics: Some(DeviceMetrics { battery_level: 101, voltage: 4.306, channel_utilization: 1.6433334, air_util_tx: 0.6466389 }), channel: 0, via_mqtt: true, hops_away: 0 }
+        handle_nodeinfo_packet(node_info, readings)
+    };
+}
+
+async fn push_queries_to_influx(client: Client, readings: Vec<NodeInfoReading>) {
+    let queries: Vec<_> = readings.iter().map(|r| r.clone().into_query("node_info")).collect();
+    client.query(queries).await.unwrap();
+    log::info!(target="metrics", number_of_nodeinfo = readings.len(); "Successfully submitted node_info readings to InfluxDB");
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let meshtastic_url = std::env::var("MESHTASTIC_URL")
         .unwrap_or_else(|_| "192.168.117.176:4403".to_string());
 
-
     let client = Client::new(influxdb_url, influxdb_database);
     let stream_api = StreamApi::new();
     let mut readings: Vec<NodeInfoReading> = Vec::new();
@@ -33,148 +55,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_id = utils::generate_rand_id();
     let stream_api = stream_api.configure(config_id).await?;
-    use tokio::time::{sleep, Duration};
 
     loop {
         tokio::select! {
             Some(decoded_packet) = decoded_listener.recv() => {
                 // Only process and display NodeInfo packets
-                handle_from_radio_packet(decoded_packet, &client, &mut readings)
+                handle_from_radio_packet(decoded_packet, &mut readings)
             }
             _ = sleep(Duration::from_secs(3)) => {
-                let _stream_api = stream_api.disconnect().await?;
                 break;
             }
         }
     }
 
+    let _stream_api = stream_api.disconnect().await?;
+
     Builder::with_level("info")
         .with_target_writer("*", new_writer(tokio::io::stdout()))
         .init();
 
-    let queries: Vec<_> = readings.iter().map(|r| r.clone().into_query("node_info")).collect();
-    client.query(queries).await.unwrap();
-    log::info!(target="metrics", number_of_nodeinfo = readings.len(); "Successfully submitted node_info readings to InfluxDB");
-
+    push_queries_to_influx(client, readings).await;
 
     Ok(())
-}
-
-
-/// A helper function to handle packets coming directly from the radio connection.
-/// The Meshtastic `PhoneAPI` will return decoded `FromRadio` packets, which
-/// can then be handled based on their payload variant. Note that the payload
-/// variant can be `None`, in which case the packet should be ignored.
-fn handle_from_radio_packet(from_radio_packet: meshtastic::protobufs::FromRadio, client: &Client, readings: &mut Vec<NodeInfoReading>) {
-    // Remove `None` variants to get the payload variant
-    let payload_variant = match from_radio_packet.payload_variant {
-        Some(payload_variant) => payload_variant,
-        None => {
-            //println!("Received FromRadio packet with no payload variant, not handling...");
-            return;
-        }
-    };
-
-    // `FromRadio` packets can be differentiated based on their payload variant,
-    // which in Rust is represented as an enum. This means the payload variant
-    // can be matched on, and the appropriate user-defined action can be taken.
-    match payload_variant {
-        //meshtastic::protobufs::from_radio::PayloadVariant::Channel(channel) => {
-        //    println!("Received channel packet: {:?}", channel);
-        //}
-        meshtastic::protobufs::from_radio::PayloadVariant::NodeInfo(node_info) => {
-            if node_info.last_heard == 0 {
-                return;
-            }
-            // NodeInfo { num: 3663944616, user: None, position: Some(Position { latitude_i: 526477974, longitude_i: 50414422, altitude: 10, time: 0, location_source: LocUnset, altitude_source: AltUnset, timestamp: 0, timestamp_millis_adjust: 0, altitude_hae: 0, altitude_geoidal_separation: 0, pdop: 0, hdop: 0, vdop: 0, gps_accuracy: 0, ground_speed: 0, ground_track: 0, fix_quality: 0, fix_type: 0, sats_in_view: 0, sensor_id: 0, next_update: 0, seq_number: 0, precision_bits: 0 }), snr: 0.0, last_heard: 1731338908, device_metrics: Some(DeviceMetrics { battery_level: 101, voltage: 4.306, channel_utilization: 1.6433334, air_util_tx: 0.6466389 }), channel: 0, via_mqtt: true, hops_away: 0 }
-            handle_nodeinfo_packet(node_info, client, readings)
-        }
-        //meshtastic::protobufs::from_radio::PayloadVariant::Packet(mesh_packet) => {
-        //    println!("Received mesh packet");
-        //}
-        _ => {
-            //println!("Received other FromRadio packet, not handling...");
-            return;
-        }
-    };
-}
-
-#[derive(InfluxDbWriteable, Clone)]
-struct NodeInfoReading {
-    time: DateTime<Utc>,
-    #[influxdb(tag)]
-    node_id: String,
-    #[influxdb(tag)] 
-    long_name: String,
-    #[influxdb(tag)]
-    short_name: String,
-    snr: f32,
-    battery_level: u32,
-    voltage: f32,
-    channel_utilization: f32,
-    air_util_tx: f32,
-    latitude: i32,
-    longitude: i32,
-    altitude: i32,
-    #[influxdb(tag)]
-    via_mqtt: bool,
-    #[influxdb(tag)]
-    hops_away: u32
-}
-
-fn handle_nodeinfo_packet(node_info: meshtastic::protobufs::NodeInfo, client: &Client, readings: &mut Vec<NodeInfoReading>) {
-    // Extract user info if available
-    let (node_id, long_name, short_name) = match &node_info.user {
-        Some(user) => (
-            user.id.clone(),
-            user.long_name.clone(),
-            user.short_name.clone()
-        ),
-        None => (
-            String::from("unknown"),
-            String::from("unknown"),
-            String::from("unknown")
-        )
-    };
-
-    // Extract device metrics if available
-    let (battery_level, voltage, channel_util, air_util) = match &node_info.device_metrics {
-        Some(metrics) => (
-            metrics.battery_level,
-            metrics.voltage,
-            metrics.channel_utilization,
-            metrics.air_util_tx
-        ),
-        None => (0, 0.0, 0.0, 0.0)
-    };
-
-    // Extract position data if available
-    let (latitude, longitude, altitude) = match &node_info.position {
-        Some(pos) => (
-            pos.latitude_i,
-            pos.longitude_i,
-            pos.altitude
-        ),
-        None => (0, 0, 0)
-    };
-
-    let reading = NodeInfoReading {
-        time: DateTime::<Utc>::from_timestamp(node_info.last_heard as i64, 0).unwrap(),
-        node_id,
-        long_name,
-        short_name,
-        snr: node_info.snr,
-        battery_level,
-        voltage,
-        channel_utilization: channel_util,
-        air_util_tx: air_util,
-        latitude,
-        longitude,
-        altitude,
-        via_mqtt: node_info.via_mqtt,
-        hops_away: node_info.hops_away
-    };
-
-    readings.push(reading.clone());
-
 }
